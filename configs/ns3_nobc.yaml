@@ -1,0 +1,273 @@
+# v13 A/B 变体：由 configs/ns3.yaml 派生，**不做 BC 初始化**
+# 目的：验证「Q(HO) 虚高来自 BC 的 class weight(17.74) 偏置」这一假设。
+# 诊断实测：RL 在服务 SINR=+15.5dB 时切向 SINR=-16dB 的小区并 3-4 步 RLF，
+# 而 A3 选 stay。若去掉 BC 初始化后该现象消失 → 确认是 BC 偏置问题。
+# 仅 eps_start 1.0→0.5（无 BC 时不需从纯随机起步，避免浪费早期样本）。
+# NS-3 后端训练配置（Stage C，云端 T4）
+#
+# 用法：
+#   python -m scripts.train_ns3 --config configs/ns3.yaml --device cuda --net hybrid
+#
+# ns3.binary 为 hsr-rl 构建产物路径。release 构建比 debug 快数倍，推荐：
+#   cd /workspace/ns3 && ./ns3 configure -d release && ./ns3 build hsr-rl
+#   → build/scratch/ns3-dev-hsr-rl/release/hsr-rl
+# debug 构建路径：build/scratch/ns3-dev-hsr-rl/debug/hsr-rl
+
+device: cuda
+seed: 42
+
+channel:
+  fc_hz: 3500000000.0
+  bw_hz: 20000000.0
+  bs_tx_power_dbm: 43
+  bs_height_m: 35
+  ue_height_m: 1.5
+  noise_figure_db: 7
+
+mobility:
+  speed_mps: 83.3
+  dt_s: 0.1
+
+env:
+  backend: ns3
+  episode_steps: 480        # 48s（首个决策点在 0.3s）
+  obs_dim: 23
+  extended_obs: true   # 14 维基础 + 9 维扩充；false 可回到旧口径做 A/B  # NS-3 后端：14 维基础 + 9 维扩充（n3/候选SINR/隧道/RLF计时/in-cell/guard/测量有效性）
+  n_actions: 7
+  w_throughput: 0.5
+  w_handover: 0.3
+  w_delay: 0.1
+  w_stability: 0.1
+  ho_penalty: 3.0
+  pingpong_penalty: 5.0
+  stability_bonus: 0.5
+  rlf_sinr_db: -6
+  rlf_consecutive_steps: 3
+  rlf_fallback_sinr_db: -5
+  # RLF 兜底持续性（对标 L3 测量滤波）：单次深衰落不得触发切换
+  fallback_persist_steps: 8
+  # 预防性回落（三级安全层 §2.4，与 default.yaml 同口径）
+  preempt_rsrp_dbm: -105.0
+  preempt_margin_db: 4.0
+  # ---- 以下三项此前只在 default.yaml 补齐，NS-3 侧缺失会让 ns3_env 取到
+  # w_outage=0（弱覆盖预警完全关闭）——这正是 Stage2 前期学到「永不切换」
+  # 退化策略的温床。现按 default.yaml 同口径补齐（设计方案 §2.3）。
+  w_outage: 0.6
+  weak_coverage_sinr_db: -2.0
+  # RLF 终止按**剩余步数**计罚：RLF 惩罚 = drop*remaining + termination，
+  # 避免 agent 发现「一次固定小罚 + 永不切换」比正常切换更划算。
+  rlf_drop_penalty: 1.0
+  rlf_termination_penalty: 10.0
+  # RLF 计罚按「剩余步数」线性增长；全灭分布下每集都是数百量级的同款
+  # 负数 → Q 无区分度、PER 又放大灾难样本。封顶后「早死」仍明显劣于
+  # 「活到最后」（60×1+10 vs 正常集的正收益），但梯度不被淹没。
+  # 0 = 不封顶（旧行为）。
+  rlf_remaining_cap_steps: 60
+  # 洞口数据面塌陷兜底：口部 dl≈0 而宏站 RSRP 仍有 -62dBm，SINR 路径不开火。
+  # 此前 ns3.yaml 缺此键（默认 0 = 关闭），训练侧比评估侧少一条兜底。
+  fallback_tp_collapse_mbps: 0.1
+  # ---- 切换质量即时惩罚（诊断驱动）----
+  # 切换后 window 步内，新链路 SINR 每比切换前低 1dB 就按 w 扣一次、
+  # 分摊到 window 步（第一步即带负奖励）。这让「切向更弱小区」在**一步内**
+  # 可学，不必等几十步后的 RLF。0 = 关闭。
+  # 0.2：最坏情况（比切换前低 20dB）每步 -0.4、累计 -4.0/次错误切换，
+  # 相对单步吞吐奖励（≈1.7）足够显著，又不至于盖过 RLF 主惩罚。
+  ho_quality_w: 0.2
+  ho_quality_window_steps: 10
+  ho_quality_max_drop_db: 20.0
+  buf_arrival_kbps: 5000
+safety:
+  min_target_rsrp_dbm: -110
+  max_drop_vs_serving_db: 6
+  pingpong_block_steps: 2
+  rlf_fallback_sinr_db: -5
+  # strict = 每步都按规则掩码（历史行为）；guard = 默认放行给 RL 探索，
+  # 只有当 RL 退化到比规则差时才让规则接管（见 src/agents/safety.RuleGuard）。
+  # 取 strict 的代价是评估中 79.3% 决策被 masked_weak 改写成 stay、ho=0。
+  mode: guard
+
+# 规则门禁参数：滚动比较「RL 主导回合」与「A3 教师回合」的平均收益
+guard:
+  enable: true
+  window_episodes: 8      # 每侧最多取最近多少集成绩做一次比较
+  min_episodes: 2         # 每侧至少几集才触发比较（不足则维持放行）
+  margin: 0.0             # RL 需低过规则 margin×|R_rule| 才算退化（0 = 落后即接管）
+  release_comparisons: 3  # 连续几次比较 RL 已追平规则才释放接管（滞回，防抖动）
+
+agent:
+  gamma: 0.99
+  lr: 1.0e-3
+  hidden_dim: 128
+  # CPU/DCU 再平衡（2026-09-18 实测：训练中 DCU 利用率 0%，瓶颈全在
+  # NS-3 仿真与锁步控制；6 路采集只用了 32 核里的 ~8 核）。
+  # 加大 batch 是「免费」的算力利用 —— 采集并行，DCU 侧变慢不拖慢出样本。
+  batch_size: 256
+  buffer_size: 20000
+  eps_start: 0.5
+  eps_end: 0.01
+  eps_decay: 0.995
+  target_sync_steps: 100
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+  per_epsilon: 1.0e-6
+  # n 步回报（设计方案 §4.3 P2）。NS-3 侧切换中断 12-40ms + 切换后信道需
+  # 数步才稳定，信用分配链更长，故 n 步回报在这里比 Python 侧更有价值。
+  # 1 = 关闭。Stage2 并行采集时 episode 边界由 ParallelCollector 的
+  # EPISODE_END 哨兵通知主线程刷新窗口。
+  # 3 → 8：诊断显示「切错 → SINR 崩到 -24dB → RLF」跨几十步，n=3 只能把
+  # 后果回传 3 步，Q 学不到切错的代价。放大到 8 覆盖约 0.8s 的因果链
+  # （γ^n 的 bootstrap 折扣已修正，放大不会引入系统性高估）。
+  n_step: 8
+
+# A3 教师（采集示范 / 退化对比 / 评估基线）——**必须与 eval_*.yaml 同口径**。
+#
+# 2026-09-17 关键修复：ns3.yaml 此前没有这段，Baseline 走默认（TTT 320ms、
+# L3 α=0.4）。高铁 83m/s 下 320ms ≈ 26m，且 L3 滤波把洞口 raw +4dB 滤成
+# 约 -7dB → **TTT 从未启动，教师切不进洞内微站**，采集的示范全是「进洞即死」
+# 轨迹（标定实测 tunnel 族存活率 0/3）。而 eval_tunnel.yaml 用的是洞口调参
+# 版本（40ms/α=1.0/raw_enter），所以评估侧 A3 能跑满 480 步 —— 训练/评估
+# 教师口径不一致，是比「场景太难」更根本的缺陷。
+a3_operator:
+  hyst_db: 2.0
+  ttt_ms: 40
+  a3_offset_db: 3.0
+  doppler_adaptive: true
+  l3_alpha: 1.0
+  raw_enter: true
+
+hybrid:
+  ode_steps: 8
+  ode4_hidden: 32
+
+# 网络构造参数（顶层 net_kwargs，所有网络工厂共享签名；不用的键被忽略）。
+# 必须与 Stage1 BC 预训练（configs/hsr_load.yaml 的 net_kwargs）保持一致，
+# 否则 bc_init.pt 的 state_dict 加载到 Stage2 时网络结构不匹配会报错。
+net_kwargs:
+  ode_steps: 2      # 每个 env 步(100ms)内部 RK4 子步数（Stage1 用 2）
+  ode_hidden: 64    # ODE 隐层宽度（Stage1 用 64；注意不是 hybrid.ode4_hidden）
+  dt_s: 0.1
+
+training:
+  # 注意：Stage2 的「集数」实际是**学习周期数**（train_ns3.py 每个 cycle
+  # drain 一次 outbox 再 learn K 次），不是采集回合数。100 cycles 只对应
+  # 约 3800 transitions / 11 集实际经验，属严重欠训练（c100 eval R=-336、
+  # outage=1）。这里放大到 1200 cycles ≈ 2 万 learn 步，墙钟约 1.5-2h。
+  n_episodes: 1200
+  # 真正的训练量口径：环境交互步数。cycle 只是节拍器（1200 cycles 实测
+  # 只攒到 66 集/19.6k 步），用它当预算会严重误判训练量。两者取先到者。
+  budget_env_steps: 120000
+  warmup_steps: 3
+  checkpoint_dir: checkpoints_ns3
+  checkpoint_freq: 10
+  init_ckpt: checkpoints_ns3/bc_init.pt   # Stage1 BC 初始化（--init 覆盖）
+  # 同上：16 → 32，把闲置的 DCU 算力用起来（目标利用率 20-40%）
+  learn_steps_per_cycle: 32   # 每个学习周期连续 learn 次数
+  target_sync_every: 100      # 每多少 learn step 同步目标网
+  # 内联评估每次要跑 2 集真实 NS-3（约 50-90s），1200 cycles 下每 25 cycles
+  # 评估会让评估开销占比过高；放宽到 50 cycles（约 24 次监控点）。
+  eval_every_cycles: 50       # 多少学习周期做一次 eps=0 评估
+  eval_device: cuda:1         # 评估设备（单卡回退 cuda:0）
+  min_buffer_before_learn: 256
+
+eval:
+  # 训练内联评估仅用于监控曲线（每集约 160s 墙钟）；正式对比用
+  # scripts/eval_ns3.py 跑 10 集同 seed 配对 + 动作分布统计。
+  n_episodes: 2
+
+collector:
+  # 容器 32 核，此前 6 路只用了 ~8 核 → 数据供给是节流阀（v9 全程仅 66 集）。
+  # 提到 12 路：目标 episodes/分钟 ×1.5-2，把 DCU 从「等数据」里解放出来。
+  n_collectors: 12             # 12 路 NS-3 并行（每路单线程仿真）
+  # mixed：A3 教师与 RL 自身策略（网络快照）共同产出经验。纯 a3 采集时
+  # buffer 里 100% 是教师动作，RL 只能克隆 A3、无法发现更优决策（Stage2
+  # 第一轮实测：HO 次数/std 与 A3 完全一致，RL 无区分度）。
+  collect_policy: mixed
+  # frac=0.5/eps=0.2 首轮实测：快照自由跑比例过高，BC 策略在自致状态分布上
+  # 复合偏移，episode 大量 RLF 早停（3790 trans/53 集，均值 71 步/集），
+  # 训练后 5/10 集切弱小区 RLF。降到 0.3/0.1：教师主导轨迹、探索仍入 buffer。
+  mixed_bootstrap_frac: 0.3    # 走网络快照的概率（其余走 A3 教师）
+  mixed_eps: 0.1               # 快照动作中的 ε-随机探索率（纯贪心快照只会复刻自身）
+  snapshot_every_steps: 200    # 每多少个 **learn step** 把 online 网权重同步给 collector 的 CPU 快照（单位是 learn steps，非 cycle）
+
+ns3:
+  # 云端海光 DCU 环境实际路径（wrapper 已设 LD_LIBRARY_PATH=.../build/lib）
+  binary: /work/home/<HPC_ACCOUNT>/ns3root/run_hsr.sh
+  cwd: /work/home/<HPC_ACCOUNT>/ns3root/ns-3.43
+  # {rng_run} 会被每 episode 的种子替换
+  # 射频参数显式对齐 spec：20MHz/43dBm/7dB/band1(2.1GHz)
+  args: "--nEnb=8 --spacing=1000 --offset=50 --speed=83.3 --dur=52 --dt=0.1 --cbrRate=100 --dlRb=100 --txPowerDbm=43 --ueNoiseFigure=7 --earfcn=100 --rngRun={rng_run}"
+  timeout_s: 600
+  scenario:
+    randomize: true
+    n_bg_ue: [16, 32]          # 背景高速 UE 数区间（共站负载）
+    bg_speed_mps: [83, 138]    # 300-500 km/h
+    bg_spawn_s: 6000.0         # 背景 UE 初始纵向散布 m
+    bg_cluster_frac: [0.0, 0.6] # 聚集慢行 UE 比例区间（扎堆偶数号小区→非均匀负载，
+                                # 偶数站拥塞/奇数站空闲；RL 可学切向空闲次强小区，
+                                # A3 的 RSRP 贪心学不会负载分流）
+    voip_frac: [0.15, 0.30]    # VoIP(QCI1 GBR) 比例区间
+    video_frac: [0.30, 0.50]   # 视频/eMBB(QCI6/9) 比例区间
+    tunnel_loss_db: [20, 25]   # 宏站穿洞额外路损 dB（上限对齐 eval_tunnel 的 25）
+    # v2 洞内微站（漏缆近似）：微站↔洞内 UE 只加 3dB 耦合衰减，洞内有覆盖，
+    # A3 教师洞内可存活 → 隧道重新纳入训练分布（randomize 路径每段 p=0.6
+    # 保留，见 ns3_env.py build_scenario_args）。
+    # 2026-09-17 标定：按**已验证可存活**的 eval_tunnel 取值对齐（原
+    # 250m/30dBm/3dB 组合下 A3 教师 3/3 全灭在进洞处）。
+    tunnel_enb_spacing_m: 200.0
+    tunnel_enb_tx_dbm: 33.0
+    tunnel_micro_loss_db: 0.0
+    tunnels:
+      - [2000, 2800]
+      - [5000, 5600]
+
+  # ---- 场景族（课程化）----
+  # 只覆盖「难度维度」（背景 UE 数 / 聚集比例 / 隧道有无），拓扑与射频继承
+  # 基础 scenario。enabled=false 的族不入训练池：2026-09-17 标定实测
+  # congested 族 A3 教师 4/4 全灭（258/480 步、outage=1.0、R=14.5±13.8），
+  # 对规则策略都不可存活 → 不能作为训练分布（RL 得不到正样本）。
+  # 定期重跑 scripts/calibrate_scenes.py 复核（微站/负载参数变更后必跑）。
+  scenario_families:
+    normal:
+      randomize: true
+      n_bg_ue: [0, 8]
+      bg_cluster_frac: [0.0, 0.0]
+      tunnels: []
+    tunnel:
+      randomize: true
+      n_bg_ue: [0, 8]
+      bg_cluster_frac: [0.0, 0.0]
+      tunnels: [[2000, 2800], [5000, 5600]]
+      # 教师口径修复（TTT 40ms/α=1.0/raw_enter）+ 微站参数对齐后重标定：
+      # survival 1.00、480/480 步、R=476.3 → 重新入池
+    load:
+      randomize: true
+      n_bg_ue: [8, 16]
+      bg_cluster_frac: [0.0, 0.3]
+      tunnels: []
+    congested:
+      randomize: true
+      n_bg_ue: [16, 32]
+      bg_cluster_frac: [0.0, 0.6]
+      tunnels: [[2000, 2800], [5000, 5600]]
+      # 教师口径修复后重标定：survival 1.00、480/480、R=394.5 → 重新入池
+
+# 课程：训练池 = 所有 enabled 族（ParallelCollector 均匀采样）；
+# 内联评估固定在代表族上，不与训练随机化纠缠（正式对比走 eval_ns3）。
+curriculum:
+  order: [normal, tunnel, load, congested]
+  eval_family: normal
+
+# 奖励基线折算（方案 §5.4）：r_tp = log1p(tp) − log1p(baseline)。
+# 由 scripts/calibrate_scenes.py --write 产出（configs/scene_baseline.json）
+# 后同步；0/缺省 = 不折算（保持原口径）。
+# ⚠ 单位：对数域均值 mean(log1p(tp))，与奖励项 r_tp=log1p(tp) **同域**。
+# 用线性 Mbps 均值做基线会每步扣掉一个巨大常数（实测让 A3 存活集 R 从
+# +500 变成 -331），使「早死(RLF 封顶 -70)」比「活到最后」更划算 → 激励倒挂。
+# 当前置空（= 不折算，保持原口径），待标定脚本输出 log_tp_mean 后填入。
+reward_baselines:
+  # 2026-09-17 第三轮标定（教师口径修复后，configs/scene_baseline_r3.json）
+  normal: 2.117
+  tunnel: 2.093
+  load: 1.873
+  congested: 1.752

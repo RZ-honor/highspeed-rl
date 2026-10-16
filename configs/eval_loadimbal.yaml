@@ -1,0 +1,116 @@
+# 场景评估配置：loadimbal（非均匀负载：32 背景 UE 中 70% 聚集偶数号小区慢行——
+# 偶数站拥塞/奇数站空闲；RL 可学"牺牲少量 RSRP 切向空闲次强小区"，A3 只做 RSRP 贪心）
+# 注：曾设 48 UE（训练上限的 1.5 倍），LENA FlowMonitor 对每背景流出跟踪，
+# ep3 起仿真病态变慢（单集 >50 分钟）并拖垮容器；32 为已验证可稳定运行的压力上限。
+# 由 configs/ns3.yaml 派生，仅 ns3.scenario 固定化；其余参数与训练一致。
+device: cuda
+seed: 42
+
+channel:
+  fc_hz: 2100000000.0
+  bw_hz: 20000000.0
+  bs_tx_power_dbm: 43
+  bs_height_m: 35
+  ue_height_m: 1.5
+  noise_figure_db: 7
+
+mobility:
+  speed_mps: 83.3
+  dt_s: 0.1
+
+env:
+  backend: ns3
+  episode_steps: 480
+  obs_dim: 23
+  extended_obs: true   # 14 维基础 + 9 维扩充；false 可回到旧口径做 A/B  # NS-3 后端：14 维基础 + 9 维扩充（n3/候选SINR/隧道/RLF计时/in-cell/guard/测量有效性）
+  n_actions: 7
+  w_throughput: 0.5
+  w_handover: 0.3
+  w_delay: 0.1
+  w_stability: 0.1
+  ho_penalty: 3.0
+  pingpong_penalty: 5.0
+  stability_bonus: 0.5
+  rlf_sinr_db: -6
+  rlf_consecutive_steps: 3
+  rlf_fallback_sinr_db: -5
+  # 弱覆盖预警（设计方案 §2.3，与 default.yaml 同口径）
+  w_outage: 0.6
+  weak_coverage_sinr_db: -2.0
+  # RLF 按剩余步数计罚（不足则退化为「永不切换」策略）
+  rlf_drop_penalty: 1.0
+  rlf_termination_penalty: 10.0
+  # 单次深衰落不得触发兜底（L3 滤波口径）
+  fallback_persist_steps: 8
+  # 预防性回落（三级安全层 §2.4）
+  preempt_rsrp_dbm: -105.0
+  preempt_margin_db: 4.0
+  buf_arrival_kbps: 5000
+
+safety:
+  min_target_rsrp_dbm: -110
+  max_drop_vs_serving_db: 6
+  pingpong_block_steps: 2
+  rlf_fallback_sinr_db: -5
+
+agent:
+  gamma: 0.99
+  lr: 1.0e-3
+  hidden_dim: 128
+  batch_size: 64
+  buffer_size: 20000
+  eps_start: 1.0
+  eps_end: 0.01
+  eps_decay: 0.995
+  target_sync_steps: 100
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+  per_epsilon: 1.0e-6
+
+a3_operator:
+  hyst_db: 2.0
+  ttt_ms: 320
+  a3_offset_db: 3.0
+  doppler_adaptive: true
+
+net_kwargs:
+  ode_steps: 2
+  ode_hidden: 64
+  dt_s: 0.1
+
+training:
+  n_episodes: 100
+  warmup_steps: 3
+  checkpoint_dir: checkpoints_ns3
+  checkpoint_freq: 10
+  learn_steps_per_cycle: 16
+  target_sync_every: 100
+  eval_every_cycles: 25
+  eval_device: cuda:1
+  min_buffer_before_learn: 256
+
+eval:
+  n_episodes: 5
+
+collector:
+  n_collectors: 6
+  collect_policy: a3
+  mixed_bootstrap_frac: 0.3
+  snapshot_every_steps: 200
+
+ns3:
+  binary: /work/home/<HPC_ACCOUNT>/ns3root/run_hsr.sh
+  cwd: /work/home/<HPC_ACCOUNT>/ns3root/ns-3.43
+  args: "--nEnb=8 --spacing=1000 --offset=50 --speed=83.3 --dur=52 --dt=0.1 --cbrRate=100 --dlRb=100 --txPowerDbm=43 --ueNoiseFigure=7 --earfcn=100 --rngRun={rng_run}"
+  timeout_s: 600
+  scenario:
+    randomize: false
+    n_bg_ue: 32             # 高峰共站负载（= 训练随机化上限）
+    bg_speed_mps: [83, 138]
+    bg_spawn_s: 6000.0
+    voip_frac: 0.3
+    video_frac: 0.5
+    tunnel_loss_db: 25.0
+    bg_cluster_frac: 0.7    # 70% 背景 UE 扎堆偶数站（慢行 0-10m/s）
+    tunnels: []             # 无隧道（负载分流场景，排除隧道混淆变量）

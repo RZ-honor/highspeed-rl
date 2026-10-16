@@ -1,0 +1,16 @@
+[project]
+name = "highspeed-rl"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["numpy", "torch", "gymnasium", "pyyaml", "matplotlib"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-timeout"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+# 单用例硬超时（需 pytest-timeout，未安装时该项被忽略），防止众核主机
+# 上偶发的线程争抢把 CI 拖成"假死"
+timeout = 300
+asyncio_default_fixture_loop_scope = "function"

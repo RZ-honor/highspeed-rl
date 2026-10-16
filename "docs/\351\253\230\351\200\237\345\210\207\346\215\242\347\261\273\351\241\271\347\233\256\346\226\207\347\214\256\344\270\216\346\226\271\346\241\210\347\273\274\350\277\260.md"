@@ -1,0 +1,135 @@
+# 高速切换类项目：文献综述、建模范式与方案映射
+
+> 目的：为「高速铁路 / 车联网越区切换」这一类问题，梳理业界与学术界**如何建模、如何解、
+> 为什么这样解**，并逐项对照本项目的现状，明确可借鉴与不可借鉴之处。
+>
+> 说明：本文分三类信息，阅读时请注意区分——
+> **① 检索所得的公开工作**（给出标题与出处，结论按检索摘要转述）；
+> **② 领域通用知识**（3GPP 规范体系与业界通行做法）；
+> **③ 本项目的实测事实**（可溯源到 `docs/整段路径测评体系与阶段化方案.md` 与 `session_logs/`）。
+> 凡未读到原文的数值，一律不引用，避免把二手转述当结论。
+
+---
+
+## 1. 检索到的相关工作（按技术路线归类）
+
+| 路线 | 工作（标题 / 出处） | 做法要点（按检索摘要） | 可借鉴点 |
+|---|---|---|---|
+| **参数自适应** | An improved 5G-R adaptive high-speed railway handover algorithm（北航学报, 2023） | 指出 5G-R 采用**固定切换参数**，高速时性能劣化；改为随速度/信道自适应 | 承认"固定 A3 参数在高速下失效"这一前提，与本项目 A3 基线定位一致 |
+| | ETASR VADFLC（ETASR 期刊） | 依据 UE 速度与信道状态**动态调整 A3 Offset / Hys / TTT** 三个典型 HCP | 最小改动、最易落地；可作为本项目"参数自适应基线"对照 |
+| **位置辅助** | Fast Handover Algorithm Based on Location and Weight in 5G-R（MDPI Sensors 21(9):3100, 2021） | 基于**大量实测数据 + UE 位置**做快速切换判决 | 位置/轨迹先验在高铁线状拓扑下信息量极高；本项目已有 `ue_x`，但尚未把它做成显式判决依据 |
+| **预测式** | Enhancing Handoff Performance in 5G Based High-Speed Rail（IEEE, 2024） | 用**预测模型**生成前瞻信息，实现"提前的、有准备的"切换 | 与本项目 `r_potential` 势阱项同源；说明"提前量"是高铁切换的核心杠杆 |
+| **学习式（直接决策）** | 5G Handover using Reinforcement Learning（arXiv 1904.02572） | 把切换优化直接建模为 RL 问题 | 与本项目同构；可对照其状态/动作/奖励设计 |
+| | Intelligent Handover Algorithm for Vehicle-to-Network（Univ. of Glasgow） | DL/RL 做车联网切换优化，强调**部署成本低**（软件更新即可） | 呼应本项目"不依赖新硬件、纯策略改进"的定位 |
+| | Smooth Handovers via Smoothed Online Learning（arXiv 2501.08099） | 把切换/关联建模为**在线学习（bandit 类）**问题，关注 KPI 平滑 | 提示"乒乓与抖动"本身可作为优化目标，而非只约束 |
+| **学习式（参数调控/负载）** | RL Based Mobility Load Balancing with the Cell Individual Offset（IEEE, 2021） | 用 RL 调 **CIO**，通过偏置引导用户分布，而非强制切换 | **与本项目 `w_load` 失败的根因直接相关**：业界走"调参"而非"强制动作" |
+| | RL based mobility load balancing: a two-layered approach（Springer, 2024） | **两层结构**：上层定策略/参数，下层执行 | 分层可降低动作空间维度与安全风险 |
+| | Mobility Load Management: A Deep RL Approach（IEEE, 2021） | 针对负载管理复杂度，用数据驱动自优化 | 同上的动机论证 |
+| | Dual-Graph Multi-Agent RL for CIO（arXiv 2603.24634） | 利用 CIO 的**成对结构**，建模为去中心化 POMDP | **多智能体分解**思路：把 N 个小区的偏置解耦，值得后续在更大规模时考虑 |
+| | Deep RL Approach to QoS-Aware Load Balancing（arXiv 2510.24869） | 面向密集动态 5G 的 QoS 感知负载均衡 | 与本项目"p05/公平性"指标取向一致 |
+| **仿真平台** | RU Energy Modeling for O-RAN in ns3-oran（arXiv 2509.10978） | 在 ns-3 上扩展 O-RAN（含切换迟滞等参数） | 若后续要迁到 5G-LENA/O-RAN 体系，可参考其扩展方式 |
+
+---
+
+## 2. 五条技术路线与"为什么"
+
+### 2.1 固定参数 → 自适应参数（HCP 调参）
+- **做法**：A3 Offset、Hysteresis、TTT（以及 CIO）随速度/信道/负载自适应。
+- **原因**：TTT 与列车速度存在直接矛盾——300 km/h 下 40 ms 的 TTT 对应约 3.3 m 位移，
+  而切换带只有几百米；固定 TTT 在低速时过短（乒乓多）、高速时过长（来不及切）。
+- **边界**：调参改善的是**平均表现**，无法在"覆盖本身接近失效"的点上创造可用性。
+
+### 2.2 位置/轨迹辅助（线状拓扑特有）
+- **做法**：以里程/位置作为判决输入或触发条件（配合轨道先验）。
+- **原因**：高铁是**一维约束运动**，未来位置几乎可预测；这比通用二维随机游走场景的
+  信息量大得多，因此"提前切换"在高铁场景的收益上限远高于一般蜂窝场景。
+- **边界**：隧道口/微站嵌套等拓扑突变处，位置先验若与真实覆盖不一致会引入系统性错误。
+
+### 2.3 预测式切换（势阱/前瞻）
+- **做法**：用前瞻的覆盖预测（或势函数）构造"提前量"，在覆盖塌陷前完成准备。
+- **原因**：切换失败的代价远大于过早切换；把"事后补救"改成"事前准备"是鲁棒性的主要来源。
+- **与本项目关系**：`r_potential`（隧道/洞口势阱项）即此类；S2 实测显示 RL 的增益**完全集中在
+  切换带与洞内**，与该路线的预判一致。
+
+### 2.4 学习式：两种范式必须区分开
+| | **直接决策**（本项目采用） | **参数调控**（MLB 主流） |
+|---|---|---|
+| 动作 | 每一步选"切/不切/切向谁" | 周期性调 CIO/偏置/阈值 |
+| 优点 | 上限高、可表达复杂时机 | 动作维度低、天然平滑、易与安全机制共存、可解释 |
+| 缺点 | 易抖动、安全风险高、需要安全层 | 收益受限，受制于底层规则的能力 |
+| 风险 | 单步错误直接掉话 | 参数错只是分布略偏 |
+
+**这条对照解释了本项目的一个关键负结果**：`w_load`（显式负载奖励）导致 congested 场景
+存活 1.00→0.33。业界的 MLB 从不"强制切向空闲小区"，而是**用 CIO 偏置温和引导**。我们的
+动作空间里没有这一类"偏置动作"，于是负载目标只能通过"硬切"实现，与覆盖目标直接对立。
+
+### 2.5 多连接/冗余（EN-DC、DAPS、移动中继）
+- **做法**：双连接、DAPS（双活协议栈）、移动中继（MR）等。
+- **原因**：把"中断"与"失败"解耦——先建后断，从根上消除切换中断。
+- **本项目边界**：LENA 无 EN-DC 实现，`dual` 动作在 `ns3_env` 侧被掩码；要真正吃到这条
+  路线的收益必须迁到 5G-LENA，属"平台级"投入，应在方案里显式标注为外部依赖而非策略问题。
+
+---
+
+## 3. 建模要素对照（业界通行 vs 本项目）
+
+| 建模要素 | 业界通行做法 | 本项目 | 差异与影响 |
+|---|---|---|---|
+| 系统模型 | 线状拓扑、站距/隧道分明、可含移动中继 | 8 宏站 ×1000 m + 洞内微站 | 站距偏大→切换带 SINR 仅 −4.7 dB（实测），覆盖裕度小 |
+| 信道 | 3GPP RMa/HST 专用模型、阴影+快衰落 | 对数距离 + 阴影 + 穿透 + Jakes | 已具备快衰落（fading 族验证过 +6.5%），与 RMa 相比缺少的部分需在文档中声明 |
+| 移动性 | 匀速为主，部分含加减速 | 匀速 83.3 m/s | 进站/出站段暂无；S2 的 J1/J6 分段可补充 |
+| MDP 状态 | RSRP/SINR/速度/位置/负载/历史 | 28 维（14 基础 + 9 扩充 + 负载） | 已含负载与隧道，属较完整的一档 |
+| MDP 动作 | 离散目标选择 / 参数增量 | 离散 7 动作（stay + 3 邻区 + 2 dual + noop） | dual 被掩码 → 实际有效动作 5，动作空间偏小但更安全 |
+| 奖励 | 吞吐+中断+乒乓惩罚 | 控车吞吐 + 时延惩罚 + 切换/中断/RLF 惩罚 + BC 锚定 | 已做 reward_sanity（G3）门禁 |
+| 仿真平台 | ns-3 LENA / 5G-LENA / 自研系统级 | ns-3.43 LENA（锁步 IPC） | 锁步保证可复现，但单线程墙钟 α≈1.0 是规模上限 |
+| 评价 | HOF/PP/RLF、中断时长、吞吐、时延、公平性 | survival 为主 + 吞吐/时延/p05/Jain/黑洞/中断 | 已补 `blackout_ms_per_km` 与 `interrupt_ms_per_km` 双件套 |
+
+---
+
+## 4. 本项目的实测结论与文献的相互印证
+
+| 本项目实测（S2，见 `docs/整段路径测评体系与阶段化方案.md`） | 对应的业界经验 |
+|---|---|
+| RL 增益 100% 集中在切换带（J3）与洞内（J5），稳态段与 A3 重合 | 与 §2.3「预测式/提前量」路线一致：可优化空间只在覆盖塌陷处 |
+| 增益不是靠多切换换来（`ho_per_km`、中断均持平） | 与 §2.1 的"乒乓约束"取向一致 |
+| 洞内最差点 A3 为 −7.4 dB（低于 −6 dB RLF 门限），RL 为 −5.5 dB | 与 §2.5「中断/失败解耦」的动机一致：安全裕度是首要目标 |
+| 资源越紧张增益越大（带宽减半 +34.2% > 隧道 +25~32% > 规模 +19~29%） | 与 §2.4「直接决策上限高」一致：约束越紧，策略价值越凸显 |
+| 饱和源（CBR=100）会掩盖切换质量差异，导致 Δ≡0 | 文献普遍在**非饱和或显式 QoS 约束**下设题，这与我们"必须用非饱和业务压测"的修正是同一件事 |
+| 显式负载奖励在 congested 掉话（存活 1.00→0.33） | 与 §2.4 表格一致：业界用 CIO 偏置而非硬切 |
+
+---
+
+## 5. 可落地的四项改进（映射到阶段化方案）
+
+| 建议 | 借鉴来源 | 落在哪个阶段 | 预期收益 | 风险 |
+|---|---|---|---|---|
+| **A. 增加"参数偏置"类动作**（CIO 增量，而非目标硬切） | §2.1 + §2.4 参数调控 | S3 → S4 | 让"负载分流"不再与覆盖对立，是 `w_load` 失败的正解 | 动作空间 +k 维，需重新标定 BC 与安全层 |
+| **B. 位置/里程作为显式判决输入** | §2.2 位置辅助 | S3（obs 扩展） | 高铁一维运动下信息量最高；有望提升洞前提前量 | obs 维度变化 ⇒ 需重跑 BC（本项目已有两次教训） |
+| **C. 抖动/乒乓入奖励（平滑性目标）** | §2.4 在线学习 + §2.1 | S3 | 减少"每段都有一小段变差"的现象（S2 已观测到） | 权重需门禁（reward_sanity + 六族配对） |
+| **D. 平台迁移评估（EN-DC/DAPS）** | §2.5 多连接 | S5 之外 | 从根上消除中断，收益量级大于策略调优 | LENA 不支持 → 需迁 5G-LENA；应作为独立的平台级评估项 |
+
+---
+
+## 6. 参考（可溯源）
+
+1. An improved 5G-R adaptive high-speed railway handover algorithm — 北京航空航天大学学报, 2023.
+   DOI: 10.13700/j.bh.1001-5965.2023.0148
+2. Fast Handover Algorithm Based on Location and Weight in 5G-R — MDPI Sensors 21(9):3100, 2021.
+3. Enhancing Handoff Performance in 5G Based High-Speed Rail — IEEE, 2024（文献号 10920233）.
+4. VADFLC：动态调整 A3 Offset / Hys / TTT — ETASR.
+5. 5G Handover using Reinforcement Learning — arXiv:1904.02572.
+6. Smooth Handovers via Smoothed Online Learning — arXiv:2501.08099.
+7. RL Based Mobility Load Balancing with the Cell Individual Offset — IEEE, 2021（文献号 9448785）.
+8. RL based mobility load balancing in cellular networks: a two-layered approach — Springer SIViP, 2024.
+   DOI: 10.1007/s11760-024-03287-x
+9. Mobility Load Management in Cellular Networks: A Deep RL Approach — IEEE, 2021（文献号 9525270）.
+10. Dual-Graph Multi-Agent RL for CIO — arXiv:2603.24634.
+11. Deep RL Approach to QoS-Aware Load Balancing — arXiv:2510.24869.
+12. Intelligent Handover Algorithm for Vehicle-to-Network — Univ. of Glasgow (eprints 269469).
+13. RU Energy Modeling for O-RAN in ns3-oran — arXiv:2509.10978.
+
+> 检索方式：关键词 `high-speed railway handover reinforcement learning 5G-R`、
+> `conditional handover CHO high speed train 3GPP`、
+> `deep reinforcement learning handover optimization ns-3 LENA O-RAN`、
+> `mobility load balancing handover parameter optimization cell individual offset`。
+> 本次仅取到标题与摘要级信息；若需把某篇的具体状态/奖励设计用作对照基线，需获取原文后再补。

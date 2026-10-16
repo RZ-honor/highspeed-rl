@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+checkpoints/
+*.pt
+.venv/
+.pytest_cache/
+# bridge 信箱回传日志（脚本本身纳管，*.log 不纳管）
+session_logs/*.log
+checkpoints_stage*/
+
+# ---- 整理（2026-10-16）：证据无损压缩件与本地工具产物不入库 ----
+*.gz
+*.tgz
+session_logs/**/logs/
+session_logs/raw_evidence.tar.gz
+**/*.log
+wheels/
+playground/
+.zcode/
+.claude/
+.mcp.json
+nul
+NUL

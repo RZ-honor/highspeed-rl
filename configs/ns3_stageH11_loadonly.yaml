@@ -1,0 +1,243 @@
+device: cuda
+seed: 42
+channel:
+  fc_hz: 3500000000.0
+  bw_hz: 20000000.0
+  bs_tx_power_dbm: 43
+  bs_height_m: 35
+  ue_height_m: 1.5
+  noise_figure_db: 7
+mobility:
+  speed_mps: 83.3
+  dt_s: 0.1
+env:
+  backend: ns3
+  episode_steps: 480
+  obs_dim: 28
+  extended_obs: true
+  load_obs: true
+  load_norm_denom: 32.0
+  n_actions: 7
+  w_throughput: 0.15
+  w_handover: 0.3
+  w_delay: 0.1
+  w_stability: 0.1
+  w_coverage: 0.15
+  coverage_good_sinr_db: 10.0
+  w_gap: 0.05
+  coverage_gap_scale_db: 15.0
+  w_load: 0.0
+  load_gap_scale_ue: 4.0
+  load_gap_deadband_ue: 1.0
+  ho_penalty: 3.0
+  pingpong_penalty: 5.0
+  stability_bonus: 0.5
+  rlf_sinr_db: -6
+  rlf_consecutive_steps: 3
+  rlf_fallback_sinr_db: -5
+  fallback_persist_steps: 8
+  preempt_rsrp_dbm: -105.0
+  preempt_margin_db: 4.0
+  w_outage: 0.3
+  weak_coverage_sinr_db: -2.0
+  rlf_drop_penalty: 1.0
+  rlf_termination_penalty: 10.0
+  rlf_remaining_cap_steps: 60
+  fallback_tp_collapse_mbps: 0.1
+  ho_quality_w: 0.2
+  ho_quality_window_steps: 10
+  ho_quality_max_drop_db: 20.0
+  buf_arrival_kbps: 5000
+safety:
+  min_target_rsrp_dbm: -110
+  max_drop_vs_serving_db: 6
+  pingpong_block_steps: 2
+  rlf_fallback_sinr_db: -5
+  mode: guard
+guard:
+  enable: false
+  window_episodes: 8
+  min_episodes: 2
+  margin: 0.0
+  release_comparisons: 3
+agent:
+  gamma: 0.99
+  lr: 0.0001
+  hidden_dim: 128
+  batch_size: 1024
+  buffer_size: 500000
+  eps_start: 1.0
+  eps_end: 0.01
+  eps_decay: 0.995
+  target_sync_steps: 100
+  bc_anchor_w: 0.02
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+  per_epsilon: 1.0e-06
+  n_step: 8
+a3_operator:
+  hyst_db: 2.0
+  ttt_ms: 40
+  a3_offset_db: 3.0
+  doppler_adaptive: true
+  l3_alpha: 1.0
+  raw_enter: true
+hybrid:
+  ode_steps: 8
+  ode4_hidden: 32
+net_kwargs:
+  ode_steps: 2
+  ode_hidden: 64
+  dt_s: 0.1
+training:
+  n_episodes: 1200
+  budget_env_steps: 140000
+  warmup_steps: 3
+  checkpoint_dir: checkpoints_stageH11
+  checkpoint_freq: 10
+  init_ckpt: checkpoints_stageH8/best.pt
+  anchor_init: checkpoints_stageH8/best.pt
+  learn_steps_per_cycle: 16
+  target_sync_every: 100
+  eval_every_cycles: 200
+  eval_device: cuda:1
+  eval_timeout_s: 900
+  min_buffer_before_learn: 256
+  learn_min_new_transitions: 64
+  early_stop_patience: 4
+eval:
+  n_episodes: 2
+  max_steps: 0
+collector:
+  n_collectors: 6
+  collect_policy: mixed
+  mixed_bootstrap_frac: 0.1
+  mixed_eps: 0.1
+  snapshot_every_steps: 200
+ns3:
+  binary: /work/home/<HPC_ACCOUNT>/ns3root/run_hsr.sh
+  cwd: /work/home/<HPC_ACCOUNT>/ns3root/ns-3.43
+  args: --nEnb=8 --spacing=1000 --offset=50 --speed=83.3 --dur=52 --dt=0.1 --cbrRate=20
+    --dlRb=100 --txPowerDbm=43 --ueNoiseFigure=7 --earfcn=100 --rngRun={rng_run}
+  timeout_s: 600
+  scenario:
+    randomize: true
+    n_bg_ue:
+    - 24
+    - 48
+    bg_speed_mps:
+    - 83
+    - 138
+    bg_spawn_s: 6000.0
+    bg_cluster_frac:
+    - 0.0
+    - 0.6
+    voip_frac:
+    - 0.15
+    - 0.3
+    video_frac:
+    - 0.3
+    - 0.5
+    tunnel_loss_db:
+    - 20
+    - 25
+    tunnel_enb_spacing_m: 200.0
+    tunnel_enb_tx_dbm: 33.0
+    tunnel_micro_loss_db: 0.0
+    tunnels:
+    - - 2000
+      - 2800
+    - - 5000
+      - 5600
+  scenario_families:
+    normal:
+      randomize: true
+      n_bg_ue:
+      - 0
+      - 8
+      bg_cluster_frac:
+      - 0.0
+      - 0.0
+      tunnels: []
+      enabled: false
+    tunnel:
+      randomize: true
+      weight: 0.3
+      n_bg_ue:
+      - 0
+      - 8
+      bg_cluster_frac:
+      - 0.0
+      - 0.0
+      tunnels:
+      - - 2000
+        - 2800
+      - - 5000
+        - 5600
+      enabled: false
+    load:
+      randomize: true
+      n_bg_ue:
+      - 16
+      - 48
+      bg_cluster_frac:
+      - 0.0
+      - 0.3
+      tunnels: []
+      enabled: true
+    congested:
+      randomize: true
+      weight: 0.25
+      n_bg_ue:
+      - 32
+      - 64
+      bg_cluster_frac:
+      - 0.0
+      - 0.6
+      tunnels:
+      - - 2000
+        - 2800
+      - - 5000
+        - 5600
+      enabled: false
+    hotcold:
+      randomize: true
+      weight: 0.15
+      n_bg_ue:
+      - 32
+      - 64
+      bg_cluster_frac:
+      - 0.5
+      - 0.6
+      tunnels: []
+      cold_neighbor_boost_db: 6.0
+      enabled: false
+    fading:
+      enabled: false
+      randomize: true
+      n_bg_ue:
+      - 0
+      - 8
+      bg_cluster_frac:
+      - 0.0
+      - 0.0
+      tunnels: []
+      fast_fading: true
+      fc_hz: 2.12e9
+      jakes_n: 34
+curriculum:
+  order:
+  - normal
+  - tunnel
+  - load
+  - congested
+  eval_family: normal
+reward_baselines:
+  normal: 2.117
+  tunnel: 2.093
+  load: 1.873
+  congested: 1.752
+tp_baseline_mode: episode
+tp_baseline_warmup_steps: 40
+tp_smooth_k: 10

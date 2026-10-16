@@ -1,0 +1,113 @@
+device: auto
+seed: 42
+
+channel:
+  fc_hz: 3500000000.0
+  bw_hz: 20000000.0
+  bs_tx_power_dbm: 43
+  bs_height_m: 35
+  ue_height_m: 1.5
+  noise_figure_db: 7
+  reuse: 1
+  street_width_w: 5
+  building_height_h: 5
+  shadow_sigma_los: 4.1
+  shadow_sigma_nlos: 6.9
+  d_corr_los: 37
+  d_corr_nlos: 120
+  jakes_n_rays: 34
+  penetration_db: 28
+  # 定向天线可见干扰源数 k：高铁沿轨定向覆盖，列车实际只见邻近 2~4 个小区，
+  # 远处小区被波瓣抑制。设计方案 §1.2：只取最强 k 个干扰源，否则场景退化为
+  # 干扰受限、A3 事件（邻区优于服务 3dB）几乎不成立，基线失真。
+  n_interferers: 3
+  # 天线增益（链路预算独立项，RMa 路损模型不含）。沿轨高增益定向面板 15dBi
+  # + 车顶天线/车厢分布系统 3dBi（与 hsr_load/bc_ns3 标定一致）。
+  # 未建模时 500m 处 RSRP ≈ -92dBm，与 NS-3 侧实测口径相差约 18dB。
+  bs_antenna_gain_dbi: 15
+  ue_antenna_gain_dbi: 3
+
+mobility:
+  speed_mps: 83.3
+  dt_s: 0.1
+  bs_spacing_min_m: 500
+  bs_spacing_max_m: 2000
+  bs_offset_min_m: 50
+  bs_offset_max_m: 100
+  n_bs: 8
+  tunnels: []
+  # 示例隧道: [{x_start: 2000, x_end: 2500, extra_loss_db: 25}]
+
+env:
+  episode_steps: 500
+  obs_dim: 14
+  n_actions: 7
+  ho_interruption_ms_min: 12
+  ho_interruption_ms_max: 40
+  dual_setup_ms: 10
+  # 切换中断窗幅度 A_HO：g(τ) = 1 - A_HO·frac·sin(πτ)（设计方案 §1.4）
+  ho_amplitude: 0.8
+  rlf_sinr_db: -6
+  rlf_consecutive_steps: 3
+  # ---- 三级安全层（设计方案 §2.4）----
+  # 预防性回落：服务 RSRP 跌破预警门限且邻区优 margin 以上 → 替换为切换动作
+  preempt_rsrp_dbm: -105.0
+  preempt_margin_db: 4.0
+  # RLF 兜底持续性（对标 L3 测量滤波）：单次深衰落不得触发切换
+  fallback_persist_steps: 3
+  rlf_fallback_sinr_db: -5.0
+  # ---- 奖励（设计方案 §2.3）----
+  w_throughput: 0.5
+  w_handover: 0.3
+  w_delay: 0.1
+  w_stability: 0.1
+  ho_penalty: 3.0
+  pingpong_penalty: 5.0
+  stability_bonus: 0.5
+  # 弱覆盖预警：SINR ∈ [-6,-2] dB 线性罚、跌破 RLF 门限加倍罚，
+  # 纠正「为省切换罚而赖在劣化小区」
+  w_outage: 0.6
+  weak_coverage_sinr_db: -2.0
+  # RLF 终止按**剩余步数**计罚，否则 agent 会学到「永不切换」的退化策略
+  rlf_drop_penalty: 1.0
+  rlf_termination_penalty: 10.0
+  # 势能整形（隧道势阱）：默认无隧道，权重 0
+  potential_shaping_weight: 0.0
+  buf_arrival_kbps: 5000.0
+
+safety:
+  min_target_rsrp_dbm: -110
+  max_drop_vs_serving_db: 6
+  pingpong_block_steps: 2
+  rlf_fallback_sinr_db: -5
+
+agent:
+  gamma: 0.99
+  lr: 1.0e-3
+  hidden_dim: 128
+  batch_size: 64
+  buffer_size: 10000
+  eps_start: 1.0
+  eps_end: 0.01
+  eps_decay: 0.995
+  target_sync_steps: 100
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+  per_epsilon: 1.0e-6
+  # n 步回报（设计方案 §4.3 P2）：切换/中断的后果延迟数步才显现，
+  # n 步回报把 bootstrap 次数从 1 降到 1/n。1 = 关闭（退回单步 TD）
+  n_step: 3
+
+training:
+  n_episodes: 500
+  warmup_steps: 3
+  checkpoint_dir: checkpoints
+  checkpoint_freq: 1
+
+eval:
+  n_episodes: 10
+
+hybrid:
+  ode_steps: 8
+  ode4_hidden: 32

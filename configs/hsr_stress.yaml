@@ -1,0 +1,162 @@
+# 高铁压力场景（对标现网 350km/h 运营 + 密集站 + 隧道群）
+# 目的：让标准 A3（固定 TTT/磁滞）暴露乒乓与中断缺陷，
+#      使 RL-ODE 的「预测式切换」优势可量化显现。
+#
+# 场景设计依据（运营商现网实践）：
+#   - 350km/h 复兴号运营速度，100ms 决策粒度 → 每步位移 9.72m
+#   - 京沪/京广高铁站间距实际 500-800m（密集区段），非 1000m+
+#   - 隧道群：高铁线路隧道占比常达 30%+，入口/出口产生 20-30dB 突变
+#   - 车厢穿透损耗 28dB（3GPP TR 38.901 高铁场景）
+
+device: auto
+seed: 42
+
+channel:
+  fc_hz: 2100000000.0      # band1 2.1GHz（LENA 频段表上限，相对对比用）
+  bw_hz: 20000000.0        # 20MHz → 100RB，吞吐天花板已修正
+  bs_tx_power_dbm: 43      # spec 对齐（LENA 默认 30dBm 会低估 13dB）
+  bs_height_m: 35
+  ue_height_m: 1.5
+  noise_figure_db: 7       # spec 对齐（LENA 默认 9dB 抬高噪声底）
+  reuse: 1
+  # 定向天线可见干扰源数（高铁沿轨定向覆盖，列车只见邻近 2~4 小区）
+  n_interferers: 3
+  street_width_w: 5
+  building_height_h: 5
+  shadow_sigma_los: 4.1
+  shadow_sigma_nlos: 6.9
+  d_corr_los: 37
+  d_corr_nlos: 120
+  jakes_n_rays: 34
+  penetration_db: 28       # 车厢穿透损耗，高铁场景关键
+  # 天线增益（链路预算独立项，RMa 路损模型不含）。
+  # 高铁专网沿轨高增益定向面板 15dBi；车顶天线+车厢分布系统 3dBi。
+  # 未建模时 500m 处 RSRP ≈ -92dBm（实测 SINR 均值 3.8dB、46% 步弱覆盖），
+  # 相当于网络瘫痪，所有策略都在与 RLF 搏斗，切换策略差异被完全淹没。
+  bs_antenna_gain_dbi: 15
+  ue_antenna_gain_dbi: 3
+
+mobility:
+  speed_mps: 97.2          # 350 km/h，非 83.3(300km/h)
+  dt_s: 0.1                # 100ms 决策粒度（3GPP 测量上报周期）
+  bs_spacing_min_m: 500    # 密集站：现网高铁密集区段 500-800m
+  bs_spacing_max_m: 800
+  bs_offset_min_m: 50      # 站点距轨距离（垂直偏移）
+  bs_offset_max_m: 100
+  n_bs: 12                 # 加密至 12 站，覆盖 ~6-8km
+  # 隧道群：3 段隧道，入口/出口产生 RSRP 突变，是 A3 乒乓主因。
+  # 注意：实网高铁隧道内敷设漏泄电缆/分布式天线做覆盖，额外损耗远小于完全封闭场景。
+  # 取 12-15dB（入口突变仍显著，足以诱发 A3 乒乓，但不至于必然 RLF）。
+  tunnels:
+    - {x_start: 1200, x_end: 1700, extra_loss_db: 12}
+    - {x_start: 3100, x_end: 3500, extra_loss_db: 15}
+    - {x_start: 5200, x_end: 5900, extra_loss_db: 12}
+
+env:
+  episode_steps: 600       # 60s @100ms
+  # 观测统一为 16 维（含 2 维负载特征），与 hsr_load 一致以便 checkpoint 迁移。
+  # 本场景 load.enabled=false → obs[14]/obs[15] 恒为 0（占位，不参与判别）。
+  obs_dim: 16
+  obs_load_features: true
+  n_actions: 7
+  ho_interruption_ms_min: 12
+  ho_interruption_ms_max: 40
+  dual_setup_ms: 10
+  rlf_sinr_db: -6
+  # 3GPP T310 = 1000ms（NSA/SA 默认），100ms 粒度 → 10 步，而非 3 步(300ms)。
+  # 原 3 步过严，导致几乎所有策略在 ~20% 处就早停，测出的吞吐全是截断偏差。
+  rlf_consecutive_steps: 10
+  # 分级门限（对标现网：切换准备门限早于执行门限）
+  # 服务 RSRP 跌破 preempt_rsrp_dbm 且存在优于其 preempt_margin_db 的邻区 → 预防性切换
+  # 预防门限设为极小值 = 关闭预防性回落（实测其会覆盖 RL 学到的保守策略，
+  # 反而使 HO 从 3.1 回升到 7.3、优势消失；仅保留 RLF 兜底）
+  preempt_rsrp_dbm: -200.0
+  preempt_margin_db: 999.0
+  rlf_fallback_sinr_db: -5
+  # 弱覆盖预警（设计方案 §2.3，与 default.yaml 同口径）
+  w_outage: 0.6
+  weak_coverage_sinr_db: -2.0
+  # 应急兜底持续性（L3 滤波）：8 步(800ms)，逼近 T310=1000ms，作为最后手段
+  fallback_persist_steps: 8
+  # RLF 断链代价：按剩余步数计，与评估口径一致。
+  # 必须足够大，否则 agent 会走「永不切换」捷径（规避 ho_penalty 却整段掉线）。
+  rlf_drop_penalty: 1.0
+  rlf_termination_penalty: 10.0
+  # 权重：突出吞吐与中断代价，弱化切换次数（现网以用户体验为准）
+  w_throughput: 0.5
+  w_handover: 0.3
+  w_delay: 0.1
+  w_stability: 0.1
+  ho_penalty: 3.0
+  pingpong_penalty: 5.0
+  stability_bonus: 0.5
+  # 势能 shaping：接近隧道入口提前决策（演进方案 §4.3）
+  potential_shaping_weight: 2.0
+  buf_arrival_kbps: 5000.0
+
+safety:
+  min_target_rsrp_dbm: -110
+  max_drop_vs_serving_db: 6
+  pingpong_block_steps: 2
+  rlf_fallback_sinr_db: -5
+  # 屏蔽 dual/triple（3/4/6）：LTE LENA 无 EN-DC，这些动作在真实数据面是空操作。
+  # 不屏蔽会形成奖励漏洞——吞吐按两条链路 Shannon 相加凭空翻倍，且 _active
+  # 一旦变双元素就持续领取 stability_bonus（600 步累积 +30，而一次 HO 才 −0.9）。
+  mask_dual: true
+
+# 网络构造参数（顶层 net_kwargs，所有网络工厂共享签名；不用的键被忽略）
+# 语义变更：ode_steps 现在是「每个 env 步(100ms)内部的 RK4 子步数」，
+# 不再是伪时间 τ∈[0,1] 的切分数。一个 env 步内动力学变化平缓，
+# 2 个子步的 RK4 局部截断误差已远小于网络拟合误差；取更大值只增加算力。
+net_kwargs:
+  ode_steps: 2
+  ode_hidden: 64
+  dt_s: 0.1             # 必须与 mobility.dt_s 一致，否则外推步长错误
+
+agent:
+  gamma: 0.99
+  lr: 5.0e-4
+  hidden_dim: 128
+  batch_size: 64
+  buffer_size: 20000
+  eps_start: 1.0
+  eps_end: 0.01
+  eps_decay: 0.997
+  target_sync_steps: 100
+  per_alpha: 0.6
+  per_beta_start: 0.4
+  per_beta_end: 1.0
+  per_epsilon: 1.0e-6
+  # n 步回报（设计方案 §4.3 P2）：切换/中断后果延迟数步才显现，1 = 关闭
+  n_step: 3
+  # 潜变量动力学：多步外推预测损失（仅对潜变量网络生效）
+  # horizon=10 步 = 1s，即「预测 1 秒后的信道状态」——高铁 350km/h 下
+  # 正是 A3 TTT(320ms) 与 T310(1s) 之间的关键决策窗口。
+  dynamics:
+    enabled: true
+    weight: 0.5
+    burn_in: 6            # burn-in 只需把潜状态"带上轨道"，6 步足够
+    horizon: 10           # 外推 1s——A3 TTT(320ms) 与 T310(1s) 之间的决策窗口
+    batch_size: 16
+    episode_capacity: 200
+    every: 6              # BPTT 开销大，每 6 个 learn 步算一次
+
+training:
+  n_episodes: 800
+  warmup_steps: 3
+  checkpoint_dir: checkpoints_hsr_stress
+  checkpoint_freq: 20
+
+eval:
+  n_episodes: 10
+
+hybrid:
+  ode_steps: 8
+  ode4_hidden: 32
+
+# 运营商级 A3 基线参数（现网典型配置，非理想化）
+a3_operator:
+  hyst_db: 2.0             # A3 磁滞（现网 1-3dB，防乒乓）
+  ttt_ms: 320              # Time-to-Trigger（现网高铁 160-320ms）
+  a3_offset_db: 3.0        # A3 事件偏置
+  doppler_adaptive: true   # 多普勒自适应：v↑ → TTT↓（现网提速补偿）

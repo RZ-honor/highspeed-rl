@@ -4,23 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-High-speed rail RL-based intelligent network handover decision system. A Dueling-DDQN
-agent (MLP / Neural-ODE / **Hybrid ODE+MLP** / **Latent ODE-RNN**) learns
-handover/dual-connectivity decisions under the 3GPP TR 38.901 RMa channel model.
-The 3GPP A3 event-triggered handover is the baseline. Target scenario: 300-350 km/h
-trains.
+This repository is a high-speed rail RL handover project (Dueling-DDQN family) with
+Python + NS-3 dual backends and a two-stage pipeline (BC pretrain → NS-3 fine-tune).
 
-Two backends share one frozen contract (14-dim obs, 7 actions, identical reward):
-- **Python** (`src/envs/handover_env.py`) — cheap, for stage-1 behaviour cloning and ablations
-- **NS-3 LENA** (`src/envs/ns3_env.py` + `ns3/hsr-rl.cc`) — real packet-level simulation
+For onboarding and directory navigation, read `README.md` first.
+This file is focused on development/operations hard rules and cloud execution discipline.
 
-Training is a **two-stage pipeline**: Python behaviour cloning (A3 teacher) → NS-3 online
-fine-tuning with 6 parallel collectors.
-
-Authoritative docs:
-- `完整技术方案.md` — the original spec
-- **`docs/建模与训练完整方案.md` — the current design of record** (equations, MDP, training
-  methods, recommended final architecture). Where this file and that doc disagree, that doc wins.
+Authoritative technical record:
+- **`docs/建模与训练完整方案.md`** — current design of record.
+- `docs/整段路径测评体系与阶段化方案.md` — current evaluation-system record.
+- Historical specs/background docs are retained for traceability; if they conflict with
+  the design record above, follow the design record.
 
 ## Commands
 
@@ -62,7 +56,7 @@ setsid bash -c '/opt/conda/bin/python -m scripts.train_ns3 --config configs/ns3.
 /opt/conda/bin/python -m scripts.eval_ns3 --config configs/eval_tunnel.yaml \
     --baseline a3 --n-eval 4 --seed 900000
 /opt/conda/bin/python -m scripts.eval_ns3 --config configs/eval_tunnel.yaml \
-    --net hybrid --resume checkpoints_ns3/latest.pt --n-eval 4 --seed 900000
+    --net hybrid --resume checkpoints_ns3/best.pt --n-eval 4 --seed 900000
 ```
 
 **所有训练/仿真必须在 DCU 容器内执行**（2026-09-22 硬规则）。登录节点 `<LOGIN_NODE>`
@@ -87,7 +81,7 @@ intra-op threads by default; with this project's tiny nets/batches it causes **~
 (measured on the latent-ODE loop: 32 threads 307 s vs 4 threads 2.9 s) and made the full pytest
 suite look "hung" for 26 min. `src/__init__.py` now caps it automatically (≤8 normally, ≤4 when
 ≥16 cores) via `src/training/device.py::configure_torch_threads`; override with
-`export HSR_TORCH_THREADS=4`. After the cap: cloud full suite = **79 passed in ~184 s**.
+`export HSR_TORCH_THREADS=4`. Recent cloud regression record: **101/101 passed in ~190 s**.
 
 ```bash
 # full cloud regression (pytest-timeout is installed by bootstrap; 300 s/test guard)
